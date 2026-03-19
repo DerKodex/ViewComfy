@@ -19,6 +19,10 @@ import { initializeOpenAPIAuth } from "@/src/generated/auth-config";
 
 const settingsService = new SettingsService();
 
+const RETRYABLE_STATUS_CODES = [502, 503];
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 1000;
+
 const fetcherWithAuth = async (
     resource: string,
     getToken: ({ template }: { template: string }) => Promise<string | null>,
@@ -31,22 +35,29 @@ const fetcherWithAuth = async (
 
     const url = `${settingsService.getApiUrl()}/${resource}`;
 
-    const response = await fetch(url, {
-        headers: {
-            Authorization: `Bearer ${token}`,
-        },
-    });
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        const response = await fetch(url, {
+            headers: {
+                Authorization: `Bearer ${token}`,
+            },
+        });
 
-    if (!response.ok) {
-        // If we get a 401/403, it likely means our token is expired
-        if (response.status === 401 || response.status === 403) {
-            // This will trigger a revalidation of all SWR hooks
-            throw new Error("Token expired");
+        if (RETRYABLE_STATUS_CODES.includes(response.status) && attempt < MAX_RETRIES) {
+            await new Promise((r) => setTimeout(r, RETRY_BASE_DELAY_MS * Math.pow(2, attempt)));
+            continue;
         }
-        throw new Error(`HTTP error! status: ${response.status}`);
+
+        if (!response.ok) {
+            if (response.status === 401 || response.status === 403) {
+                throw new Error("Token expired");
+            }
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        return response.json();
     }
 
-    return response.json();
+    throw new Error("Max retries exceeded");
 };
 
 /**

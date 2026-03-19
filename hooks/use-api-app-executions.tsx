@@ -4,6 +4,11 @@
 import useSWR from "swr";
 import { AppsService } from "@/src/generated";
 import type { AppExecutionOutputDTO, AppExecutionStatusEnum } from "@/src/generated";
+import { ApiError } from "@/src/generated/core/ApiError";
+
+const RETRYABLE_STATUS_CODES = [502, 503];
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 1000;
 
 /**
  * Represents a running API app execution to track.
@@ -45,10 +50,23 @@ async function fetchExecutions(
   // Group executions by appId
   const groupedByApp = groupExecutionsByAppId(executions);
 
-  // Make one batch request per unique appId
+  // Make one batch request per unique appId, with retry on transient errors
   const batchPromises = Array.from(groupedByApp.entries()).map(
-    ([appId, executionIds]) =>
-      AppsService.getExecutionsApiAppsAppIdHistoryRunningGet(appId, executionIds)
+    async ([appId, executionIds]) => {
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          return await AppsService.getExecutionsApiAppsAppIdHistoryRunningGet(appId, executionIds);
+        } catch (error) {
+          const isRetryable = error instanceof ApiError && RETRYABLE_STATUS_CODES.includes(error.status);
+          if (isRetryable && attempt < MAX_RETRIES) {
+            await new Promise((r) => setTimeout(r, RETRY_BASE_DELAY_MS * Math.pow(2, attempt)));
+            continue;
+          }
+          throw error;
+        }
+      }
+      throw new Error("Max retries exceeded");
+    }
   );
 
   // Execute all batch requests in parallel
